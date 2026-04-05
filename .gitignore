@@ -1,0 +1,7 @@
+.env
+*.duckdb
+*.duckdb.wal
+__pycache__/
+*.har
+logs/
+.claude/settings.local.json
