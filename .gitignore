@@ -4,4 +4,4 @@
 __pycache__/
 *.har
 logs/
-.claude/settings.local.json
+.claude/
