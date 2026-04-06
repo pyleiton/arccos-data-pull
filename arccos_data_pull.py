@@ -23,7 +23,7 @@ load_dotenv()
 LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
-log = logging.getLogger("arccos_pull")
+log = logging.getLogger("arccos_data_pull")
 log.setLevel(logging.INFO)
 
 _log_fmt = logging.Formatter("%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -33,7 +33,7 @@ _log_stdout.setFormatter(_log_fmt)
 log.addHandler(_log_stdout)
 
 _log_file = logging.handlers.TimedRotatingFileHandler(
-    LOG_DIR / "arccos_pull.log",
+    LOG_DIR / "arccos_data_pull.log",
     when="midnight",
     backupCount=90,
     encoding="utf-8",
@@ -1365,11 +1365,11 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  python arccos_pull.py                      # pull all rounds (or respect .env MAX_ROUNDS)
-  python arccos_pull.py --max 1              # pull just 1 round to test
-  python arccos_pull.py --year 2025          # pull only 2025 rounds
-  python arccos_pull.py --date 2026-04-04    # pull round(s) from a specific date
-  python arccos_pull.py --year 2025 --max 0   # combine filters
+  python arccos_data_pull.py                      # pull all rounds (or respect .env MAX_ROUNDS)
+  python arccos_data_pull.py --max 1              # pull just 1 round to test
+  python arccos_data_pull.py --year 2025          # pull only 2025 rounds
+  python arccos_data_pull.py --date 2026-04-04    # pull round(s) from a specific date
+  python arccos_data_pull.py --year 2025 --max 0   # combine filters
         """,
     )
     parser.add_argument("--max", type=int, default=None,
