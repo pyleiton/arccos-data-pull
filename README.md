@@ -50,19 +50,19 @@ At minimum you need `ARCCOS_EMAIL` and `ARCCOS_PASSWORD`. The weather API key is
 
 ```bash
 # Pull all rounds
-python arccos_pull.py
+python arccos_data_pull.py
 
 # Pull only 2025 rounds
-python arccos_pull.py --year 2025
+python arccos_data_pull.py --year 2025
 
 # Pull a specific date
-python arccos_pull.py --date 2025-07-04
+python arccos_data_pull.py --date 2025-07-04
 
 # Limit to 10 new rounds
-python arccos_pull.py --max 10
+python arccos_data_pull.py --max 10
 
 # Re-pull everything (ignore existing data)
-python arccos_pull.py --fresh
+python arccos_data_pull.py --fresh
 ```
 
 The script is **resumable** -- if it's interrupted, re-run it and it picks up where it left off, skipping rounds already in the database.
