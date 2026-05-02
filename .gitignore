@@ -1,6 +1,4 @@
 .env
-*.duckdb
-*.duckdb.wal
 __pycache__/
 *.har
 logs/

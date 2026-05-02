@@ -7,9 +7,6 @@
 --   docker exec -i arccos-postgres psql -U postgres -d arccos < sql/schema.sql
 -- or:
 --   psql -h localhost -U postgres -d arccos -f sql/schema.sql
---
--- For an existing DB created before multi-tenancy, run migrations/001_multitenant.sql
--- instead. This file represents the post-migration target state.
 
 BEGIN;
 
