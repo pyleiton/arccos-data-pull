@@ -590,9 +590,18 @@ def pull_ghin_course_details(course_id: str, token: str) -> dict:
 
 # ─── PostgreSQL Schema & Storage ───────────────────────────────────────────
 
+SCHEMA_PATH = Path(__file__).parent / "sql" / "schema.sql"
+
+
 def init_db(pg_host: str = None, pg_port: int = None, pg_user: str = None,
             pg_password: str = None, pg_database: str = None) -> tuple:
-    """Connect to PostgreSQL and initialize schema. Returns (connection, cursor)."""
+    """Connect to PostgreSQL and verify the schema is present.
+    Returns (connection, cursor).
+
+    Schema management is deliberately a separate step — apply sql/schema.sql
+    manually before running this script. This avoids surprise schema changes
+    on every data-pull run.
+    """
     host = pg_host or os.getenv("PG_HOST", "localhost")
     port = pg_port or int(os.getenv("PG_PORT", "5432"))
     user = pg_user or os.getenv("PG_USER", "postgres")
@@ -602,457 +611,46 @@ def init_db(pg_host: str = None, pg_port: int = None, pg_user: str = None,
     con = psycopg2.connect(
         host=host, port=port,
         user=user, password=password,
-        dbname=database
+        dbname=database,
     )
     cur = con.cursor()
 
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS rounds (
-            round_id INTEGER PRIMARY KEY,
-            round_uuid TEXT,
-            user_id TEXT,
-            course_id INTEGER,
-            course_version INTEGER,
-            course_name TEXT,
-            start_time TIMESTAMP,
-            end_time TIMESTAMP,
-            last_modified TIMESTAMP,
-            tee_id INTEGER,
-            num_holes INTEGER,
-            num_shots INTEGER,
-            par INTEGER,
-            over_under INTEGER,
-            is_ended TEXT,
-            ball_make_id INTEGER,
-            ball_model_id INTEGER,
-            drive_hcp DOUBLE PRECISION,
-            approach_hcp DOUBLE PRECISION,
-            chip_hcp DOUBLE PRECISION,
-            sand_hcp DOUBLE PRECISION,
-            putt_hcp DOUBLE PRECISION,
-            notes TEXT,
-            -- weather enrichment (Visual Crossing)
-            avg_temp_f DOUBLE PRECISION,
-            avg_feels_like_f DOUBLE PRECISION,
-            temp_max_f DOUBLE PRECISION,
-            temp_min_f DOUBLE PRECISION,
-            avg_humidity_pct DOUBLE PRECISION,
-            avg_dew_point_f DOUBLE PRECISION,
-            avg_wind_mph DOUBLE PRECISION,
-            avg_wind_dir DOUBLE PRECISION,
-            max_wind_gust_mph DOUBLE PRECISION,
-            total_precip_in DOUBLE PRECISION,
-            precip_prob_pct DOUBLE PRECISION,
-            precip_type TEXT,
-            snow_in DOUBLE PRECISION,
-            avg_cloud_cover_pct DOUBLE PRECISION,
-            avg_pressure_hpa DOUBLE PRECISION,
-            avg_visibility_mi DOUBLE PRECISION,
-            avg_uv_index DOUBLE PRECISION,
-            avg_solar_radiation DOUBLE PRECISION,
-            solar_energy DOUBLE PRECISION,
-            severe_risk DOUBLE PRECISION,
-            moon_phase DOUBLE PRECISION,
-            feels_like_max_f DOUBLE PRECISION,
-            feels_like_min_f DOUBLE PRECISION,
-            precip_cover_pct DOUBLE PRECISION,
-            snow_depth_in DOUBLE PRECISION,
-            weather_conditions TEXT,
-            weather_description TEXT,
-            weather_icon TEXT,
-            -- sunrise/sunset enrichment
-            sunrise TEXT,
-            sunset TEXT,
-            dawn TEXT,
-            dusk TEXT,
-            day_length_hrs DOUBLE PRECISION,
-            solar_noon TEXT,
-            golden_hour TEXT,
-            first_light TEXT,
-            last_light TEXT,
-            sun_altitude DOUBLE PRECISION,
-            sunrise_azimuth DOUBLE PRECISION,
-            sunset_azimuth DOUBLE PRECISION,
-            moon_illumination DOUBLE PRECISION,
-            moon_phase_name TEXT,
-            moonrise TEXT,
-            moonset TEXT
-        )
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'users'
     """)
-
-    # Migrate: add new columns to existing tables
-    new_round_cols = {
-        "avg_feels_like_f": "DOUBLE PRECISION", "temp_max_f": "DOUBLE PRECISION",
-        "temp_min_f": "DOUBLE PRECISION",
-        "avg_dew_point_f": "DOUBLE PRECISION", "max_wind_gust_mph": "DOUBLE PRECISION",
-        "precip_prob_pct": "DOUBLE PRECISION", "precip_type": "TEXT", "snow_in": "DOUBLE PRECISION",
-        "avg_cloud_cover_pct": "DOUBLE PRECISION", "avg_pressure_hpa": "DOUBLE PRECISION",
-        "avg_visibility_mi": "DOUBLE PRECISION", "avg_uv_index": "DOUBLE PRECISION",
-        "avg_solar_radiation": "DOUBLE PRECISION", "solar_energy": "DOUBLE PRECISION",
-        "severe_risk": "DOUBLE PRECISION", "moon_phase": "DOUBLE PRECISION",
-        "feels_like_max_f": "DOUBLE PRECISION", "feels_like_min_f": "DOUBLE PRECISION",
-        "precip_cover_pct": "DOUBLE PRECISION", "snow_depth_in": "DOUBLE PRECISION",
-        "weather_conditions": "TEXT", "weather_description": "TEXT",
-        "weather_icon": "TEXT",
-        "sunrise": "TEXT", "sunset": "TEXT", "dawn": "TEXT",
-        "dusk": "TEXT", "day_length_hrs": "DOUBLE PRECISION",
-        "solar_noon": "TEXT", "golden_hour": "TEXT",
-        "first_light": "TEXT", "last_light": "TEXT",
-        "sun_altitude": "DOUBLE PRECISION", "sunrise_azimuth": "DOUBLE PRECISION",
-        "sunset_azimuth": "DOUBLE PRECISION", "moon_illumination": "DOUBLE PRECISION",
-        "moon_phase_name": "TEXT", "moonrise": "TEXT", "moonset": "TEXT",
-    }
-    for col, dtype in new_round_cols.items():
-        cur.execute(f"ALTER TABLE rounds ADD COLUMN IF NOT EXISTS {col} {dtype}")
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS holes (
-            round_id INTEGER,
-            hole_id INTEGER,
-            num_shots INTEGER,
-            is_gir TEXT,
-            putts INTEGER,
-            is_fairway TEXT,
-            is_fairway_right TEXT,
-            is_fairway_left TEXT,
-            is_sand_save_chance TEXT,
-            is_sand_save TEXT,
-            is_up_down_chance TEXT,
-            is_up_down TEXT,
-            approach_shot_id INTEGER,
-            pin_lat DOUBLE PRECISION,
-            pin_long DOUBLE PRECISION,
-            start_time TIMESTAMP,
-            end_time TIMESTAMP,
-            score_override INTEGER,
-            PRIMARY KEY (round_id, hole_id)
+    if cur.fetchone() is None:
+        con.close()
+        raise RuntimeError(
+            f"Schema not found in database '{database}'. "
+            f"Apply it first:\n"
+            f"  docker exec -i arccos-postgres psql -U postgres -d {database} < sql/schema.sql"
         )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS shots (
-            round_id INTEGER,
-            hole_id INTEGER,
-            shot_id INTEGER,
-            shot_uuid TEXT,
-            club_type INTEGER,
-            club_id INTEGER,
-            start_lat DOUBLE PRECISION,
-            start_long DOUBLE PRECISION,
-            end_lat DOUBLE PRECISION,
-            end_long DOUBLE PRECISION,
-            distance DOUBLE PRECISION,
-            is_half_swing TEXT,
-            start_altitude DOUBLE PRECISION,
-            end_altitude DOUBLE PRECISION,
-            shot_time TIMESTAMP,
-            should_ignore TEXT,
-            num_penalties INTEGER,
-            user_start_terrain_override INTEGER,
-            should_consider_putt_as_chip TEXT,
-            tour_quality TEXT,
-            PRIMARY KEY (round_id, hole_id, shot_id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sga_analysis (
-            round_id INTEGER,
-            goal_hcp INTEGER,
-            -- overall
-            overall_sga DOUBLE PRECISION,
-            drive_sga DOUBLE PRECISION,
-            approach_sga DOUBLE PRECISION,
-            short_game_sga DOUBLE PRECISION,
-            putting_sga DOUBLE PRECISION,
-            -- historic comparisons
-            historic_drive_sga DOUBLE PRECISION,
-            historic_approach_sga DOUBLE PRECISION,
-            historic_short_sga DOUBLE PRECISION,
-            historic_putting_sga DOUBLE PRECISION,
-            -- traditional stats
-            pace_of_play TEXT,
-            avg_drive_distance DOUBLE PRECISION,
-            longest_drive DOUBLE PRECISION,
-            avg_approach_distance DOUBLE PRECISION,
-            total_putts INTEGER,
-            zero_putts INTEGER,
-            one_putts INTEGER,
-            two_putts INTEGER,
-            three_putts INTEGER,
-            gir_hit INTEGER,
-            gir_total INTEGER,
-            fairways_hit INTEGER,
-            fairways_total INTEGER,
-            up_and_down_success INTEGER,
-            up_and_down_total INTEGER,
-            total_distance DOUBLE PRECISION,
-            -- score analysis
-            par3_avg_score DOUBLE PRECISION,
-            par3_sga DOUBLE PRECISION,
-            par4_avg_score DOUBLE PRECISION,
-            par4_sga DOUBLE PRECISION,
-            par5_avg_score DOUBLE PRECISION,
-            par5_sga DOUBLE PRECISION,
-            birdie_pct DOUBLE PRECISION,
-            par_pct DOUBLE PRECISION,
-            bogey_pct DOUBLE PRECISION,
-            double_plus_pct DOUBLE PRECISION,
-            -- driving detail
-            sg_distance DOUBLE PRECISION,
-            sg_accuracy DOUBLE PRECISION,
-            sg_penalties DOUBLE PRECISION,
-            -- approach detail
-            gir_pct DOUBLE PRECISION,
-            gir_miss_left_pct DOUBLE PRECISION,
-            gir_miss_right_pct DOUBLE PRECISION,
-            gir_miss_short_pct DOUBLE PRECISION,
-            gir_miss_long_pct DOUBLE PRECISION,
-            avg_proximity_gir_ft DOUBLE PRECISION,
-            avg_proximity_all_ft DOUBLE PRECISION,
-            -- putting detail
-            one_putt_pct DOUBLE PRECISION,
-            two_putt_pct DOUBLE PRECISION,
-            three_putt_pct DOUBLE PRECISION,
-            putts_per_hole DOUBLE PRECISION,
-            putts_per_gir DOUBLE PRECISION,
-            -- raw json for anything else
-            raw_json JSONB,
-            PRIMARY KEY (round_id, goal_hcp)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sga_by_distance (
-            round_id INTEGER,
-            goal_hcp INTEGER,
-            category TEXT,
-            slab_id INTEGER,
-            slab_label TEXT,
-            sga DOUBLE PRECISION,
-            shots_count INTEGER,
-            PRIMARY KEY (round_id, goal_hcp, category, slab_id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sga_by_terrain (
-            round_id INTEGER,
-            goal_hcp INTEGER,
-            category TEXT,
-            terrain TEXT,
-            sga DOUBLE PRECISION,
-            shots_count INTEGER,
-            PRIMARY KEY (round_id, goal_hcp, category, terrain)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sga_by_hole_shape (
-            round_id INTEGER,
-            goal_hcp INTEGER,
-            hole_shape TEXT,
-            sga DOUBLE PRECISION,
-            shots_count INTEGER,
-            PRIMARY KEY (round_id, goal_hcp, hole_shape)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sga_putting_by_hole (
-            round_id INTEGER,
-            goal_hcp INTEGER,
-            hole_id INTEGER,
-            sga DOUBLE PRECISION,
-            PRIMARY KEY (round_id, goal_hcp, hole_id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS clubs (
-            user_id TEXT,
-            bag_id INTEGER,
-            club_id INTEGER,
-            club_type INTEGER,
-            sensor_uuid TEXT,
-            sensor_type_id INTEGER,
-            name TEXT,
-            perceived_distance DOUBLE PRECISION,
-            start_date TIMESTAMP,
-            end_date TIMESTAMP,
-            is_deleted TEXT,
-            make TEXT,
-            model TEXT,
-            loft TEXT,
-            flex TEXT,
-            raw_json JSONB,
-            PRIMARY KEY (user_id, bag_id, club_id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS courses (
-            course_id INTEGER PRIMARY KEY,
-            course_version INTEGER,
-            course_name TEXT,
-            latitude DOUBLE PRECISION,
-            longitude DOUBLE PRECISION,
-            city TEXT,
-            state TEXT,
-            country TEXT,
-            num_holes INTEGER,
-            mens_par INTEGER,
-            womens_par INTEGER,
-            raw_json JSONB
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS course_tees (
-            course_id INTEGER,
-            tee_id INTEGER,
-            tee_name TEXT,
-            distance INTEGER,
-            slope INTEGER,
-            rating DOUBLE PRECISION,
-            PRIMARY KEY (course_id, tee_id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS weather_cache (
-            round_id INTEGER PRIMARY KEY,
-            lat DOUBLE PRECISION,
-            lon DOUBLE PRECISION,
-            date TEXT,
-            start_hour INTEGER,
-            end_hour INTEGER,
-            raw_response JSONB
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS course_holes (
-            course_id INTEGER,
-            course_version INTEGER,
-            hole_id INTEGER,
-            mens_par INTEGER,
-            womens_par INTEGER,
-            mens_handicap INTEGER,
-            womens_handicap INTEGER,
-            is_dual_green TEXT,
-            PRIMARY KEY (course_id, hole_id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS course_hole_tees (
-            course_id INTEGER,
-            hole_id INTEGER,
-            tee_id INTEGER,
-            tee_name TEXT,
-            distance DOUBLE PRECISION,
-            PRIMARY KEY (course_id, hole_id, tee_id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS player_profile (
-            user_id TEXT PRIMARY KEY,
-            handicap DOUBLE PRECISION,
-            total_rounds INTEGER,
-            holes_played INTEGER,
-            shots_played INTEGER,
-            goal_hcp DOUBLE PRECISION,
-            num_rounds_setting INTEGER
-        )
-    """)
-
-    # GHIN tables
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ghin_scores (
-            id INTEGER PRIMARY KEY,
-            golfer_id INTEGER,
-            played_at DATE,
-            course_name TEXT,
-            course_id TEXT,
-            tee_name TEXT,
-            tee_set_id TEXT,
-            tee_set_side TEXT,
-            adjusted_gross_score INTEGER,
-            front9_adjusted INTEGER,
-            back9_adjusted INTEGER,
-            net_score INTEGER,
-            net_score_differential DOUBLE PRECISION,
-            course_rating DOUBLE PRECISION,
-            slope_rating INTEGER,
-            differential DOUBLE PRECISION,
-            unadjusted_differential DOUBLE PRECISION,
-            pcc INTEGER,
-            course_handicap TEXT,
-            score_type TEXT,
-            number_of_holes INTEGER,
-            number_of_played_holes INTEGER,
-            posted_at TIMESTAMP,
-            posted_on_home_course BOOLEAN,
-            is_manual BOOLEAN,
-            edited BOOLEAN,
-            exceptional BOOLEAN,
-            used BOOLEAN,
-            revision BOOLEAN,
-            penalty TEXT,
-            penalty_type TEXT,
-            raw_json JSONB
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ghin_handicap_history (
-            id TEXT,
-            rev_date DATE,
-            handicap_index DOUBLE PRECISION,
-            low_hi DOUBLE PRECISION,
-            hard_cap TEXT,
-            soft_cap TEXT,
-            PRIMARY KEY (id)
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS ghin_hole_scores (
-            ghin_score_id INTEGER,
-            hole_number INTEGER,
-            par INTEGER,
-            raw_score INTEGER,
-            adjusted_gross_score INTEGER,
-            stroke_allocation INTEGER,
-            x_hole BOOLEAN,
-            PRIMARY KEY (ghin_score_id, hole_number)
-        )
-    """)
-
-    # SGA categories reference table
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS sga_categories (
-            category_id INTEGER PRIMARY KEY,
-            category_name TEXT NOT NULL,
-            description TEXT
-        )
-    """)
-    # Seed sga_categories if empty
-    cur.execute("SELECT COUNT(*) FROM sga_categories")
-    if cur.fetchone()[0] == 0:
-        cur.execute("""
-            INSERT INTO sga_categories (category_id, category_name, description) VALUES
-            (1, 'driving', 'Tee shots on par 4s and par 5s'),
-            (2, 'approach', 'Approach shots to the green'),
-            (3, 'chip', 'Chipping around the green'),
-            (4, 'sand', 'Sand/bunker shots'),
-            (5, 'putting', 'Putting on the green')
-        """)
-
-    con.commit()
     return con, cur
+
+
+def upsert_user(con, cur, handle: str, display_name: str = None,
+                email: str = None, arccos_user_id: str = None,
+                ghin_number: str = None) -> int:
+    """Insert or update a row in users by handle, returning the BIGINT user_id.
+    Late-binding fields (arccos_user_id, ghin_number) are filled in only when
+    the existing row has them as NULL — never overwritten."""
+    if not handle:
+        raise ValueError("ARCCOS_USER_HANDLE is required (set in .env or pass --user)")
+    cur.execute("""
+        INSERT INTO users (handle, display_name, email, arccos_user_id, ghin_number)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (handle) DO UPDATE SET
+            display_name   = COALESCE(EXCLUDED.display_name,   users.display_name),
+            email          = COALESCE(EXCLUDED.email,          users.email),
+            arccos_user_id = COALESCE(users.arccos_user_id,    EXCLUDED.arccos_user_id),
+            ghin_number    = COALESCE(users.ghin_number,       EXCLUDED.ghin_number)
+        RETURNING user_id
+    """, [handle, display_name or handle, email, arccos_user_id, ghin_number])
+    user_id = cur.fetchone()[0]
+    con.commit()
+    return user_id
+
 
 
 def _safe_ts(val):
@@ -1062,15 +660,15 @@ def _safe_ts(val):
     return val
 
 
-def store_round(con, cur, rd: dict,
+def store_round(con, cur, user_id: int, rd: dict,
                 weather: dict = None, sun: dict = None):
-    """Upsert a round and its holes/shots."""
+    """Upsert a round and its holes/shots for the given internal user_id."""
     w = weather or {}
     s = sun or {}
 
     cur.execute("""
         INSERT INTO rounds (
-            round_id, round_uuid, user_id, course_id, course_version, course_name,
+            round_id, round_uuid, user_id, arccos_user_id, course_id, course_version, course_name,
             start_time, end_time, last_modified, tee_id, num_holes, num_shots,
             par, over_under, is_ended, ball_make_id, ball_model_id,
             drive_hcp, approach_hcp, chip_hcp, sand_hcp, putt_hcp, notes,
@@ -1085,13 +683,13 @@ def store_round(con, cur, rd: dict,
             first_light, last_light, sun_altitude, sunrise_azimuth, sunset_azimuth,
             moon_illumination, moon_phase_name, moonrise, moonset
         ) VALUES (
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
         )
         ON CONFLICT (round_id) DO UPDATE SET
-            round_uuid=EXCLUDED.round_uuid, user_id=EXCLUDED.user_id,
+            round_uuid=EXCLUDED.round_uuid, arccos_user_id=EXCLUDED.arccos_user_id,
             course_id=EXCLUDED.course_id, course_version=EXCLUDED.course_version,
             course_name=EXCLUDED.course_name, start_time=EXCLUDED.start_time,
             end_time=EXCLUDED.end_time, last_modified=EXCLUDED.last_modified,
@@ -1125,7 +723,7 @@ def store_round(con, cur, rd: dict,
             moon_phase_name=EXCLUDED.moon_phase_name, moonrise=EXCLUDED.moonrise,
             moonset=EXCLUDED.moonset
     """, [
-        rd["roundId"], rd.get("roundUUID"), rd.get("userId"),
+        rd["roundId"], rd.get("roundUUID"), user_id, rd.get("userId"),
         rd["courseId"], rd.get("courseVersion"), rd.get("courseName"),
         _safe_ts(rd.get("startTime")), _safe_ts(rd.get("endTime")), _safe_ts(rd.get("lastModifiedTime")),
         rd.get("teeId"), rd.get("noOfHoles"), rd.get("noOfShots"),
@@ -1162,13 +760,13 @@ def store_round(con, cur, rd: dict,
             continue
         cur.execute("""
             INSERT INTO holes (
-                round_id, hole_id, num_shots, is_gir, putts,
+                round_id, hole_id, user_id, num_shots, is_gir, putts,
                 is_fairway, is_fairway_right, is_fairway_left,
                 is_sand_save_chance, is_sand_save,
                 is_up_down_chance, is_up_down,
                 approach_shot_id, pin_lat, pin_long,
                 start_time, end_time, score_override
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (round_id, hole_id) DO UPDATE SET
                 num_shots=EXCLUDED.num_shots, is_gir=EXCLUDED.is_gir,
                 putts=EXCLUDED.putts, is_fairway=EXCLUDED.is_fairway,
@@ -1183,7 +781,7 @@ def store_round(con, cur, rd: dict,
                 start_time=EXCLUDED.start_time, end_time=EXCLUDED.end_time,
                 score_override=EXCLUDED.score_override
         """, [
-            rd["roundId"], hole["holeId"], hole.get("noOfShots"),
+            rd["roundId"], hole["holeId"], user_id, hole.get("noOfShots"),
             hole.get("isGir"), hole.get("putts"),
             hole.get("isFairWay"), hole.get("isFairWayRight"), hole.get("isFairWayLeft"),
             hole.get("isSandSaveChance"), hole.get("isSandSave"),
@@ -1195,15 +793,30 @@ def store_round(con, cur, rd: dict,
         ])
 
         for shot in hole.get("shots", []):
+            # tour_quality is JSONB — Arccos returns either a scalar or
+            # {percentile, method}; either way, json.dumps gives valid JSON.
+            tq = shot.get("tourQuality")
+            tour_quality_json = json.dumps(tq) if tq is not None else None
+            shot_params = [
+                rd["roundId"], hole["holeId"], shot["shotId"], user_id,
+                shot.get("shotUUID"), shot.get("clubType"), shot.get("clubId"),
+                shot.get("startLat"), shot.get("startLong"),
+                shot.get("endLat"), shot.get("endLong"),
+                shot.get("distance"), shot.get("isHalfSwing"),
+                shot.get("startAltitude"), shot.get("endAltitude"),
+                _safe_ts(shot.get("shotTime")), shot.get("shouldIgnore"),
+                shot.get("noOfPenalties"), shot.get("userStartTerrainOverride"),
+                shot.get("shouldConsiderPuttAsChip"), tour_quality_json,
+            ]
             cur.execute("""
                 INSERT INTO shots (
-                    round_id, hole_id, shot_id, shot_uuid, club_type, club_id,
+                    round_id, hole_id, shot_id, user_id, shot_uuid, club_type, club_id,
                     start_lat, start_long, end_lat, end_long,
                     distance, is_half_swing, start_altitude, end_altitude,
                     shot_time, should_ignore, num_penalties,
                     user_start_terrain_override, should_consider_putt_as_chip,
                     tour_quality
-                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (round_id, hole_id, shot_id) DO UPDATE SET
                     shot_uuid=EXCLUDED.shot_uuid, club_type=EXCLUDED.club_type,
                     club_id=EXCLUDED.club_id, start_lat=EXCLUDED.start_lat,
@@ -1218,23 +831,13 @@ def store_round(con, cur, rd: dict,
                     user_start_terrain_override=EXCLUDED.user_start_terrain_override,
                     should_consider_putt_as_chip=EXCLUDED.should_consider_putt_as_chip,
                     tour_quality=EXCLUDED.tour_quality
-            """, [
-                rd["roundId"], hole["holeId"], shot["shotId"],
-                shot.get("shotUUID"), shot.get("clubType"), shot.get("clubId"),
-                shot.get("startLat"), shot.get("startLong"),
-                shot.get("endLat"), shot.get("endLong"),
-                shot.get("distance"), shot.get("isHalfSwing"),
-                shot.get("startAltitude"), shot.get("endAltitude"),
-                _safe_ts(shot.get("shotTime")), shot.get("shouldIgnore"),
-                shot.get("noOfPenalties"), shot.get("userStartTerrainOverride"),
-                shot.get("shouldConsiderPuttAsChip"), shot.get("tourQuality"),
-            ])
+            """, shot_params)
 
     con.commit()
 
 
-def store_sga(con, cur, round_id: int, goal_hcp: int, sga: dict):
-    """Store SGA analysis with full detail extraction."""
+def store_sga(con, cur, user_id: int, round_id: int, goal_hcp: int, sga: dict):
+    """Store SGA analysis with full detail extraction for the given internal user_id."""
     if not sga:
         return
     ov = sga.get("overall", {})
@@ -1251,7 +854,7 @@ def store_sga(con, cur, round_id: int, goal_hcp: int, sga: dict):
 
     cur.execute("""
         INSERT INTO sga_analysis (
-            round_id, goal_hcp,
+            round_id, goal_hcp, user_id,
             overall_sga, drive_sga, approach_sga, short_game_sga, putting_sga,
             historic_drive_sga, historic_approach_sga, historic_short_sga, historic_putting_sga,
             pace_of_play, avg_drive_distance, longest_drive, avg_approach_distance,
@@ -1273,7 +876,7 @@ def store_sga(con, cur, round_id: int, goal_hcp: int, sga: dict):
             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
         )
         ON CONFLICT (round_id, goal_hcp) DO UPDATE SET
             overall_sga=EXCLUDED.overall_sga, drive_sga=EXCLUDED.drive_sga,
@@ -1314,7 +917,7 @@ def store_sga(con, cur, round_id: int, goal_hcp: int, sga: dict):
             putts_per_hole=EXCLUDED.putts_per_hole, putts_per_gir=EXCLUDED.putts_per_gir,
             raw_json=EXCLUDED.raw_json
     """, [
-        round_id, goal_hcp,
+        round_id, goal_hcp, user_id,
         sec.get("sga"), sec.get("drivingSga"), sec.get("approachSga"),
         sec.get("shortSga"), sec.get("puttingSga"),
         # historic
@@ -1378,13 +981,13 @@ def store_sga(con, cur, round_id: int, goal_hcp: int, sga: dict):
     ]:
         for item in key.get(items_key, []):
             cur.execute("""
-                INSERT INTO sga_by_distance (round_id, goal_hcp, category, slab_id, slab_label, sga, shots_count)
-                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                INSERT INTO sga_by_distance (round_id, goal_hcp, category, slab_id, user_id, slab_label, sga, shots_count)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (round_id, goal_hcp, category, slab_id) DO UPDATE SET
                     slab_label=EXCLUDED.slab_label, sga=EXCLUDED.sga,
                     shots_count=EXCLUDED.shots_count
             """, [
-                round_id, goal_hcp, cat, item.get("slabId"),
+                round_id, goal_hcp, cat, item.get("slabId"), user_id,
                 item.get("slab", {}).get("value", ""),
                 item.get("sga"), item.get("shotsCount"),
             ])
@@ -1392,35 +995,35 @@ def store_sga(con, cur, round_id: int, goal_hcp: int, sga: dict):
     # SGA by terrain (approach)
     for item in ap.get("approachByTerrain", []):
         cur.execute("""
-            INSERT INTO sga_by_terrain (round_id, goal_hcp, category, terrain, sga, shots_count)
-            VALUES (%s,%s,%s,%s,%s,%s)
+            INSERT INTO sga_by_terrain (round_id, goal_hcp, category, terrain, user_id, sga, shots_count)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (round_id, goal_hcp, category, terrain) DO UPDATE SET
                 sga=EXCLUDED.sga, shots_count=EXCLUDED.shots_count
         """, [
-            round_id, goal_hcp, "approach", item.get("terrain"),
+            round_id, goal_hcp, "approach", item.get("terrain"), user_id,
             item.get("sga"), item.get("shotsCount"),
         ])
 
     # SGA by hole shape (driving)
     for item in dr.get("drivingByHoleShape", []):
         cur.execute("""
-            INSERT INTO sga_by_hole_shape (round_id, goal_hcp, hole_shape, sga, shots_count)
-            VALUES (%s,%s,%s,%s,%s)
+            INSERT INTO sga_by_hole_shape (round_id, goal_hcp, hole_shape, user_id, sga, shots_count)
+            VALUES (%s,%s,%s,%s,%s,%s)
             ON CONFLICT (round_id, goal_hcp, hole_shape) DO UPDATE SET
                 sga=EXCLUDED.sga, shots_count=EXCLUDED.shots_count
         """, [
-            round_id, goal_hcp, item.get("holeShape"),
+            round_id, goal_hcp, item.get("holeShape"), user_id,
             item.get("sga"), item.get("shotsCount"),
         ])
 
     # Putting SGA by hole
     for item in pu.get("puttingByHole", {}).get("holeSga", []):
         cur.execute("""
-            INSERT INTO sga_putting_by_hole (round_id, goal_hcp, hole_id, sga)
-            VALUES (%s,%s,%s,%s)
+            INSERT INTO sga_putting_by_hole (round_id, goal_hcp, hole_id, user_id, sga)
+            VALUES (%s,%s,%s,%s,%s)
             ON CONFLICT (round_id, goal_hcp, hole_id) DO UPDATE SET
                 sga=EXCLUDED.sga
-        """, [round_id, goal_hcp, item.get("holeId"), item.get("sga")])
+        """, [round_id, goal_hcp, item.get("holeId"), user_id, item.get("sga")])
 
     con.commit()
 
@@ -1502,20 +1105,21 @@ def store_course_holes(con, cur, course_id: int, course_version: int, holes: lis
     con.commit()
 
 
-def store_player_profile(con, cur, user_id: str, profile: dict):
-    """Store player profile/stats."""
+def store_player_profile(con, cur, user_id: int, arccos_user_id: str, profile: dict):
+    """Store player profile/stats keyed by internal user_id."""
     settings = profile.get("settings", {})
     cur.execute("""
         INSERT INTO player_profile (
-            user_id, handicap, total_rounds, holes_played,
+            user_id, arccos_user_id, handicap, total_rounds, holes_played,
             shots_played, goal_hcp, num_rounds_setting
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (user_id) DO UPDATE SET
+            arccos_user_id=EXCLUDED.arccos_user_id,
             handicap=EXCLUDED.handicap, total_rounds=EXCLUDED.total_rounds,
             holes_played=EXCLUDED.holes_played, shots_played=EXCLUDED.shots_played,
             goal_hcp=EXCLUDED.goal_hcp, num_rounds_setting=EXCLUDED.num_rounds_setting
     """, [
-        user_id, profile.get("handicap"),
+        user_id, arccos_user_id, profile.get("handicap"),
         profile.get("totalRounds"), profile.get("holesPlayed"),
         profile.get("shotsPlayed"),
         settings.get("goalHcp"), settings.get("noOfRounds"),
@@ -1523,19 +1127,20 @@ def store_player_profile(con, cur, user_id: str, profile: dict):
     con.commit()
 
 
-def store_clubs(con, cur, user_id: str, bag: dict):
-    """Store bag/club data."""
+def store_clubs(con, cur, user_id: int, arccos_user_id: str, bag: dict):
+    """Store bag/club data keyed by internal user_id."""
     if not bag:
         return
     bag_id = bag.get("bagId")
     for club in bag.get("clubs", []):
         cur.execute("""
             INSERT INTO clubs (
-                user_id, bag_id, club_id, club_type, sensor_uuid, sensor_type_id,
+                user_id, arccos_user_id, bag_id, club_id, club_type, sensor_uuid, sensor_type_id,
                 name, perceived_distance, start_date, end_date, is_deleted,
                 make, model, loft, flex, raw_json
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (user_id, bag_id, club_id) DO UPDATE SET
+                arccos_user_id=EXCLUDED.arccos_user_id,
                 club_type=EXCLUDED.club_type, sensor_uuid=EXCLUDED.sensor_uuid,
                 sensor_type_id=EXCLUDED.sensor_type_id, name=EXCLUDED.name,
                 perceived_distance=EXCLUDED.perceived_distance,
@@ -1545,7 +1150,7 @@ def store_clubs(con, cur, user_id: str, bag: dict):
                 loft=EXCLUDED.loft, flex=EXCLUDED.flex,
                 raw_json=EXCLUDED.raw_json
         """, [
-            user_id, bag_id, club.get("clubId"), club.get("clubType"),
+            user_id, arccos_user_id, bag_id, club.get("clubId"), club.get("clubType"),
             club.get("sensorUUID"), club.get("sensorTypeId"),
             club.get("name"), club.get("perceivedDistance"),
             club.get("startDate"), club.get("endDate"),
@@ -1557,11 +1162,11 @@ def store_clubs(con, cur, user_id: str, bag: dict):
     con.commit()
 
 
-def store_ghin_score(con, cur, s: dict):
-    """Store a GHIN score and its hole details."""
+def store_ghin_score(con, cur, user_id: int, s: dict):
+    """Store a GHIN score and its hole details for the given internal user_id."""
     cur.execute("""
         INSERT INTO ghin_scores (
-            id, golfer_id, played_at, course_name, course_id,
+            id, user_id, golfer_id, played_at, course_name, course_id,
             tee_name, tee_set_id, tee_set_side,
             adjusted_gross_score, front9_adjusted, back9_adjusted,
             net_score, net_score_differential,
@@ -1573,7 +1178,7 @@ def store_ghin_score(con, cur, s: dict):
             penalty, penalty_type, raw_json
         ) VALUES (
             %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
+            %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s
         )
         ON CONFLICT (id) DO UPDATE SET
             golfer_id=EXCLUDED.golfer_id, played_at=EXCLUDED.played_at,
@@ -1600,7 +1205,7 @@ def store_ghin_score(con, cur, s: dict):
             penalty=EXCLUDED.penalty, penalty_type=EXCLUDED.penalty_type,
             raw_json=EXCLUDED.raw_json
     """, [
-        s["id"], s.get("golfer_id"), s.get("played_at"),
+        s["id"], user_id, s.get("golfer_id"), s.get("played_at"),
         s.get("course_name"), s.get("course_id"),
         s.get("tee_name"), s.get("tee_set_id"), s.get("tee_set_side"),
         s.get("adjusted_gross_score"),
@@ -1620,16 +1225,16 @@ def store_ghin_score(con, cur, s: dict):
     for h in s.get("hole_details", []):
         cur.execute("""
             INSERT INTO ghin_hole_scores (
-                ghin_score_id, hole_number, par, raw_score,
+                ghin_score_id, hole_number, user_id, par, raw_score,
                 adjusted_gross_score, stroke_allocation, x_hole
-            ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT (ghin_score_id, hole_number) DO UPDATE SET
                 par=EXCLUDED.par, raw_score=EXCLUDED.raw_score,
                 adjusted_gross_score=EXCLUDED.adjusted_gross_score,
                 stroke_allocation=EXCLUDED.stroke_allocation,
                 x_hole=EXCLUDED.x_hole
         """, [
-            s["id"], h.get("hole_number"), h.get("par"),
+            s["id"], h.get("hole_number"), user_id, h.get("par"),
             h.get("raw_score"), h.get("adjusted_gross_score"),
             h.get("stroke_allocation"), h.get("x_hole"),
         ])
@@ -1637,17 +1242,17 @@ def store_ghin_score(con, cur, s: dict):
     con.commit()
 
 
-def store_ghin_handicap(con, cur, rev: dict):
-    """Store a handicap revision."""
+def store_ghin_handicap(con, cur, user_id: int, rev: dict):
+    """Store a handicap revision for the given internal user_id."""
     cur.execute("""
-        INSERT INTO ghin_handicap_history (id, rev_date, handicap_index, low_hi, hard_cap, soft_cap)
-        VALUES (%s,%s,%s,%s,%s,%s)
+        INSERT INTO ghin_handicap_history (id, user_id, rev_date, handicap_index, low_hi, hard_cap, soft_cap)
+        VALUES (%s,%s,%s,%s,%s,%s,%s)
         ON CONFLICT (id) DO UPDATE SET
             rev_date=EXCLUDED.rev_date, handicap_index=EXCLUDED.handicap_index,
             low_hi=EXCLUDED.low_hi, hard_cap=EXCLUDED.hard_cap,
             soft_cap=EXCLUDED.soft_cap
     """, [
-        rev.get("ID"), rev.get("RevDate", "")[:10],
+        rev.get("ID"), user_id, rev.get("RevDate", "")[:10],
         float(rev["Value"]) if rev.get("Value") else None,
         float(rev["LowHI"]) if rev.get("LowHI") else None,
         rev.get("Hard_Cap"), rev.get("Soft_Cap"),
@@ -1655,164 +1260,19 @@ def store_ghin_handicap(con, cur, rev: dict):
     con.commit()
 
 
-# ─── Metabase Views ─────────────────────────────────────────────────────────
-
-VIEWS = {
-    "v_round_summary": """
-        CREATE OR REPLACE VIEW v_round_summary AS
-        SELECT
-            r.round_id,
-            r.course_name,
-            r.start_time,
-            r.start_time::DATE as round_date,
-            EXTRACT(YEAR FROM r.start_time)::INT as year,
-            EXTRACT(MONTH FROM r.start_time)::INT as month,
-            TO_CHAR(r.start_time, 'Mon') as month_name,
-            r.par,
-            r.par + r.over_under as score,
-            r.over_under,
-            r.num_holes,
-            r.avg_temp_f,
-            r.avg_feels_like_f,
-            r.avg_wind_mph,
-            r.max_wind_gust_mph,
-            r.avg_humidity_pct,
-            r.total_precip_in,
-            r.weather_conditions,
-            r.weather_description,
-            s.overall_sga,
-            s.drive_sga,
-            s.approach_sga,
-            s.short_game_sga,
-            s.putting_sga,
-            s.avg_drive_distance,
-            s.longest_drive,
-            s.total_putts,
-            s.one_putts,
-            s.two_putts,
-            s.three_putts,
-            s.gir_hit,
-            s.gir_total,
-            CASE WHEN s.gir_total > 0
-                 THEN ROUND(s.gir_hit * 100.0 / s.gir_total, 1) END as gir_pct,
-            s.fairways_hit,
-            s.fairways_total,
-            CASE WHEN s.fairways_total > 0
-                 THEN ROUND(s.fairways_hit * 100.0 / s.fairways_total, 1) END as fairway_pct,
-            s.up_and_down_success,
-            s.up_and_down_total,
-            s.birdie_pct,
-            s.par_pct,
-            s.bogey_pct,
-            s.double_plus_pct,
-            s.par3_avg_score,
-            s.par4_avg_score,
-            s.par5_avg_score,
-            s.putts_per_hole,
-            s.putts_per_gir
-        FROM rounds r
-        LEFT JOIN sga_analysis s ON r.round_id = s.round_id AND s.goal_hcp = 0
-        WHERE r.num_holes = 18
-    """,
-
-    "v_hole_detail": """
-        CREATE OR REPLACE VIEW v_hole_detail AS
-        SELECT
-            h.round_id,
-            r.course_name,
-            r.start_time::DATE as round_date,
-            h.hole_id,
-            ch.mens_par as par,
-            h.num_shots as score,
-            h.num_shots - COALESCE(ch.mens_par, 0) as over_under,
-            h.putts,
-            h.is_gir,
-            h.is_fairway,
-            h.is_fairway_left,
-            h.is_fairway_right,
-            h.is_sand_save_chance,
-            h.is_sand_save,
-            h.is_up_down_chance,
-            h.is_up_down,
-            cht.distance as tee_distance,
-            ch.mens_handicap as handicap_rating
-        FROM holes h
-        JOIN rounds r ON h.round_id = r.round_id
-        LEFT JOIN course_holes ch ON r.course_id = ch.course_id AND h.hole_id = ch.hole_id
-        LEFT JOIN course_hole_tees cht ON r.course_id = cht.course_id
-                                       AND h.hole_id = cht.hole_id
-                                       AND r.tee_id = cht.tee_id
-        WHERE r.num_holes = 18
-    """,
-
-    "v_shot_detail": """
-        CREATE OR REPLACE VIEW v_shot_detail AS
-        SELECT
-            s.round_id,
-            r.course_name,
-            r.start_time::DATE as round_date,
-            s.hole_id,
-            s.shot_id,
-            c.club_type as real_club_type,
-            CASE c.club_type
-                WHEN 1 THEN 'Driver' WHEN 2 THEN '3-Wood' WHEN 3 THEN '5-Wood'
-                WHEN 4 THEN '7-Wood' WHEN 5 THEN 'Hybrid'
-                WHEN 6 THEN '2-Iron' WHEN 7 THEN '3-Iron' WHEN 8 THEN '4-Iron'
-                WHEN 9 THEN '5-Iron' WHEN 10 THEN '6-Iron' WHEN 11 THEN '7-Iron'
-                WHEN 12 THEN '8-Iron' WHEN 13 THEN '9-Iron' WHEN 14 THEN 'PW'
-                WHEN 15 THEN 'GW' WHEN 16 THEN 'SW' WHEN 17 THEN 'LW'
-                WHEN 42 THEN 'Putter'
-                ELSE 'Club ' || c.club_type
-            END as club_name,
-            s.distance,
-            s.start_lat,
-            s.start_long,
-            s.end_lat,
-            s.end_long,
-            s.start_altitude,
-            s.end_altitude,
-            s.num_penalties,
-            s.shot_time
-        FROM shots s
-        JOIN rounds r ON s.round_id = r.round_id
-        LEFT JOIN clubs c ON s.club_type = c.club_id
-        WHERE s.should_ignore != 'T'
-          AND r.num_holes = 18
-    """,
-
-    "v_handicap_history": """
-        CREATE OR REPLACE VIEW v_handicap_history AS
-        SELECT rev_date, handicap_index, low_hi
-        FROM ghin_handicap_history
-        WHERE handicap_index < 900
-        ORDER BY rev_date
-    """,
-}
 
 
-def create_views(con, cur):
-    """Create Metabase-friendly views."""
-    for view_name, view_sql in VIEWS.items():
-        try:
-            cur.execute(view_sql)
-            con.commit()
-            log.info(f"  View {view_name}: created")
-        except Exception as e:
-            con.rollback()
-            log.error(f"  View {view_name}: FAILED - {e}")
-
-
-def add_computed_columns(con, cur):
-    """Add and populate computed columns for Metabase filters."""
+def populate_course_and_tee(con, cur, user_id: int):
+    """Populate the rounds.course_and_tee computed column for this user."""
     try:
-        cur.execute("ALTER TABLE rounds ADD COLUMN IF NOT EXISTS course_and_tee TEXT")
         cur.execute("""
             UPDATE rounds
             SET course_and_tee = rounds.course_name || ' - ' || ct.tee_name
             FROM course_tees ct
-            WHERE rounds.course_id = ct.course_id
+            WHERE rounds.user_id = %s
+              AND rounds.course_id = ct.course_id
               AND rounds.tee_id = ct.tee_id
-        """)
+        """, [user_id])
         con.commit()
         log.info("  Computed column course_and_tee: populated")
     except Exception as e:
@@ -1847,6 +1307,8 @@ examples:
   python arccos_data_pull_pg.py --year 2025 --max 0  # combine filters
         """,
     )
+    parser.add_argument("--user", type=str, default=None,
+                        help="User handle for the row in the users table (default: env ARCCOS_USER_HANDLE)")
     parser.add_argument("--max", type=int, default=None,
                         help="Max new rounds to pull (default: 0=all, or .env ARCCOS_MAX_ROUNDS)")
     parser.add_argument("--year", type=int, default=None,
@@ -1880,8 +1342,16 @@ def main():
     log.info("=" * 60)
     log.info("")
 
+    # Resolve user identity (multi-tenant: every row will be tagged with this user)
+    handle = args.user or os.getenv("ARCCOS_USER_HANDLE")
+    if not handle:
+        log.error("ARCCOS_USER_HANDLE not set in .env and --user not given.")
+        log.error("This identifies which row in the users table the pulled data belongs to.")
+        sys.exit(1)
+    display_name = os.getenv("ARCCOS_DISPLAY_NAME") or handle
+
     # Show active filters
-    filters = []
+    filters = [f"user={handle}"]
     if args.year:
         filters.append(f"year={args.year}")
     if args.date:
@@ -1899,7 +1369,7 @@ def main():
         log.error("ARCCOS_PASSWORD not set in .env and no password provided.")
         sys.exit(1)
     auth = login(email, password)
-    user_id = auth["userId"]
+    arccos_user_id = auth["userId"]
     token = auth["token"]
     log.info("")
 
@@ -1914,23 +1384,33 @@ def main():
     pg_host = args.pg_host or os.getenv("PG_HOST", "localhost")
     pg_database = args.pg_database or os.getenv("PG_DATABASE", "arccos")
     log.info(f"Database: {pg_host}/{pg_database}")
+
+    # Resolve internal user_id (creates row if missing, fills in arccos_user_id if not yet known)
+    user_id = upsert_user(
+        con, cur,
+        handle=handle,
+        display_name=display_name,
+        email=email,
+        arccos_user_id=arccos_user_id,
+    )
+    log.info(f"User: {handle} (user_id={user_id}, arccos_user_id={arccos_user_id})")
     log.info("")
 
-    # Check what we already have
+    # Check what we already have for THIS user only
     existing = set()
     if not args.fresh:
         try:
-            cur.execute("SELECT round_id FROM rounds")
+            cur.execute("SELECT round_id FROM rounds WHERE user_id = %s", [user_id])
             rows = cur.fetchall()
             existing = {r[0] for r in rows}
             if existing:
-                log.info(f"Already have {len(existing)} rounds in DB (use --fresh to re-pull)")
+                log.info(f"Already have {len(existing)} rounds for {handle} (use --fresh to re-pull)")
         except Exception:
             con.rollback()
 
     # Pull round list
     log.info("Pulling round list...")
-    rounds_list = pull_all_rounds(user_id, token)
+    rounds_list = pull_all_rounds(arccos_user_id, token)
 
     # Apply filters
     rounds_list = filter_rounds(rounds_list, year=args.year, date=args.date)
@@ -1947,7 +1427,7 @@ def main():
           (f" (of {len(rounds_list)} total, limited by --max {max_rounds})" if max_rounds else ""))
     log.info("")
 
-    # Track courses we've already fetched
+    # Track courses we've already fetched (shared across users)
     fetched_courses = set()
     try:
         cur.execute("SELECT course_id FROM courses")
@@ -1973,7 +1453,7 @@ def main():
         log.info(f"  [{new_count}/{pull_target}] Round {round_id} ({r.get('courseName', '?')}, {r.get('startTime', '?')[:10]})")
 
         # Pull full detail
-        detail = pull_round_detail(user_id, round_id, token)
+        detail = pull_round_detail(arccos_user_id, round_id, token)
         time.sleep(0.15)
 
         # Pull SGA at multiple goal handicaps (scratch through 9)
@@ -1981,7 +1461,7 @@ def main():
         log.info(f"    Fetching SGA at {len(sga_goals)} goal handicaps...")
         sga_results = []
         for ghcp in sga_goals:
-            sga = pull_sga_analysis(user_id, round_id, token, goal_hcp=ghcp)
+            sga = pull_sga_analysis(arccos_user_id, round_id, token, goal_hcp=ghcp)
             sga_results.append((ghcp, sga))
             time.sleep(0.15)
 
@@ -2031,10 +1511,10 @@ def main():
                 detail[key] = r.get(key)
 
         # Store
-        store_round(con, cur, detail, weather, sun)
+        store_round(con, cur, user_id, detail, weather, sun)
         for ghcp, sga in sga_results:
             if sga:
-                store_sga(con, cur, round_id, ghcp, sga)
+                store_sga(con, cur, user_id, round_id, ghcp, sga)
 
         # Course + hole details (once per course, cached across runs)
         if course_id not in fetched_courses:
@@ -2076,12 +1556,12 @@ def main():
     # Pull bag/club data and player profile (once)
     try:
         log.info("  Pulling bag/club data...")
-        user_data = api_get(f"/users/{user_id}", token)
+        user_data = api_get(f"/users/{arccos_user_id}", token)
         for bag_info in user_data.get("bags", []):
             bag_id = bag_info.get("bagId")
-            bag = api_get(f"/users/{user_id}/bags/{bag_id}", token)
+            bag = api_get(f"/users/{arccos_user_id}/bags/{bag_id}", token)
             if bag:
-                store_clubs(con, cur, user_id, bag)
+                store_clubs(con, cur, user_id, arccos_user_id, bag)
                 club_count = len(bag.get("clubs", []))
                 active = sum(1 for c in bag.get("clubs", []) if c.get("isDeleted") != "T")
                 log.info(f"    Stored {club_count} clubs ({active} active) from bag {bag_id}")
@@ -2090,8 +1570,8 @@ def main():
 
     try:
         log.info("  Pulling player profile...")
-        profile = api_get(f"/sga/playerProfile/{user_id}", token)
-        store_player_profile(con, cur, user_id, profile)
+        profile = api_get(f"/sga/playerProfile/{arccos_user_id}", token)
+        store_player_profile(con, cur, user_id, arccos_user_id, profile)
         log.info(f"    HCP: {profile.get('handicap')}, Rounds: {profile.get('totalRounds')}, Shots: {profile.get('shotsPlayed')}")
     except Exception as e:
         log.error(f"Player profile pull failed: {e}")
@@ -2114,12 +1594,20 @@ def main():
             ghin_token = ghin_auth["token"]
             ghin_id = ghin_auth["golfer_id"]
 
+            # Backfill ghin_number on the user row if not yet known
+            if ghin_id:
+                cur.execute(
+                    "UPDATE users SET ghin_number = %s WHERE user_id = %s AND ghin_number IS NULL",
+                    [str(ghin_id), user_id],
+                )
+                con.commit()
+
             # Scores
             log.info("  Pulling GHIN scores...")
             ghin_scores = pull_ghin_scores(ghin_id, ghin_token)
             log.info(f"  Found {len(ghin_scores)} scores")
             for s in ghin_scores:
-                store_ghin_score(con, cur, s)
+                store_ghin_score(con, cur, user_id, s)
             time.sleep(0.2)
 
             # Handicap history
@@ -2127,7 +1615,7 @@ def main():
             revisions = pull_ghin_handicap_history(ghin_id, ghin_token)
             log.info(f"  Found {len(revisions)} revisions")
             for rev in revisions:
-                store_ghin_handicap(con, cur, rev)
+                store_ghin_handicap(con, cur, user_id, rev)
 
             log.info("")
             log.info(f"  GHIN: {len(ghin_scores)} scores, {len(revisions)} handicap revisions stored")
@@ -2140,19 +1628,17 @@ def main():
         log.info("  (Skipping GHIN — set GHIN_EMAIL and GHIN_PASSWORD in .env)")
         log.info("")
 
-    # ─── Computed columns & views ────────────────────────────────────────
-    log.info("Adding computed columns...")
-    add_computed_columns(con, cur)
-
-    log.info("Creating Metabase views...")
-    create_views(con, cur)
+    # ─── Computed columns ────────────────────────────────────────────────
+    # Views are created in sql/schema.sql at init_db time, no need to recreate.
+    log.info("Populating computed columns...")
+    populate_course_and_tee(con, cur, user_id)
     log.info("")
 
-    # Summary
+    # Summary (scoped to this user)
     log.info("=" * 60)
-    log.info("  Database Summary")
+    log.info(f"  Database Summary for {handle}")
     log.info("=" * 60)
-    cur.execute("SELECT COUNT(*) FROM rounds")
+    cur.execute("SELECT COUNT(*) FROM rounds WHERE user_id = %s", [user_id])
     count = cur.fetchone()[0]
     if count > 0:
         cur.execute("""
@@ -2163,40 +1649,46 @@ def main():
                 MAX(start_time) as latest,
                 ROUND(AVG(over_under)::numeric, 1) as avg_over_under
             FROM rounds
-        """)
+            WHERE user_id = %s
+        """, [user_id])
         summary = cur.fetchone()
         log.info(f"  Arccos rounds:      {summary[0]}")
         log.info(f"  Total shots:        {summary[1]}")
         log.info(f"  Date range:         {str(summary[2])[:10]} to {str(summary[3])[:10]}")
         log.info(f"  Avg over/under:     {summary[4]:+.1f}")
 
-    cur.execute("SELECT COUNT(*) FROM ghin_scores")
+    cur.execute("SELECT COUNT(*) FROM ghin_scores WHERE user_id = %s", [user_id])
     ghin_count = cur.fetchone()[0]
     if ghin_count > 0:
         cur.execute("""
             SELECT COUNT(*), MIN(played_at), MAX(played_at),
                    ROUND(AVG(differential)::numeric, 1)
             FROM ghin_scores
-        """)
+            WHERE user_id = %s
+        """, [user_id])
         gs = cur.fetchone()
         cur.execute("""
             SELECT handicap_index FROM ghin_handicap_history
+            WHERE user_id = %s
             ORDER BY rev_date DESC LIMIT 1
-        """)
+        """, [user_id])
         hcp = cur.fetchone()
         log.info(f"  GHIN scores:        {gs[0]} ({gs[1]} to {gs[2]})")
         log.info(f"  Avg differential:   {gs[3]}")
         if hcp:
             log.info(f"  Current HCP index:  {hcp[0]}")
 
-    cur.execute("SELECT COUNT(*) FROM sga_analysis")
+    cur.execute("SELECT COUNT(*) FROM sga_analysis WHERE user_id = %s", [user_id])
     sga_count = cur.fetchone()[0]
     if sga_count:
         log.info(f"  SGA analyses:       {sga_count}")
-    cur.execute("SELECT COUNT(*) FROM clubs")
+    cur.execute("SELECT COUNT(*) FROM clubs WHERE user_id = %s", [user_id])
     club_count = cur.fetchone()[0]
     if club_count:
-        cur.execute("SELECT COUNT(*) FROM clubs WHERE is_deleted != 'T' OR is_deleted IS NULL")
+        cur.execute(
+            "SELECT COUNT(*) FROM clubs WHERE user_id = %s AND (is_deleted != 'T' OR is_deleted IS NULL)",
+            [user_id],
+        )
         active_clubs = cur.fetchone()[0]
         log.info(f"  Clubs:              {club_count} ({active_clubs} active)")
 
