@@ -185,7 +185,6 @@ GROUP BY 1 ORDER BY 1;
 |---|---|
 | `arccos_data_pull_postgres.py` | Main data pull script |
 | `sql/schema.sql` | Database schema (apply before first run) |
-| `migrations/` | One-shot migration scripts for upgrading existing databases |
 | `.env` | Configuration (not committed) |
 
 ## API keys
