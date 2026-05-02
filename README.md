@@ -2,8 +2,6 @@
 
 Export your complete Arccos Golf history into a local [PostgreSQL](https://www.postgresql.org/) database, enriched with weather, elevation, and sunrise/sunset data. Optionally pulls GHIN handicap and score history too. Includes pre-built views for use with [Metabase](https://www.metabase.com/) dashboards.
 
-A legacy [DuckDB](https://duckdb.org/) version is also included.
-
 ## What you get
 
 Every round you've played with Arccos, stored in a queryable analytical database:
@@ -185,9 +183,9 @@ GROUP BY 1 ORDER BY 1;
 
 | File | Purpose |
 |---|---|
-| `arccos_data_pull_postgres.py` | Main data pull script (PostgreSQL) |
-| `arccos_data_pull_duckdb.py` | Legacy data pull script (DuckDB) |
-| `arccos_analysis.ipynb` | Jupyter notebook with visualizations |
+| `arccos_data_pull_postgres.py` | Main data pull script |
+| `sql/schema.sql` | Database schema (apply before first run) |
+| `migrations/` | One-shot migration scripts for upgrading existing databases |
 | `.env` | Configuration (not committed) |
 
 ## API keys
